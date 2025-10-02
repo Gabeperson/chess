@@ -2,7 +2,134 @@
 #![warn(clippy::pedantic)]
 #![warn(clippy::nursery)]
 
-use std::vec;
+
+
+mod movegen {
+    use super::*;
+
+    // bits 0-5: "from" file/rank
+    // bits 6-11: "to" file/rank
+
+    // bits 12-14: moving piece type (1-6)
+    // bit 15-17: captured piece type (1-5, 0 if no capture)
+    //     1: pawn
+    //     2: knight
+    //     3: bishop
+    //     4: rook
+    //     5: queen
+    //     6: king
+
+    // bit 18-19: promotion piece type (0 if non promotion)
+    //     Promotion:
+    //     0: knight
+    //     1: bishop
+    //     2: rook
+    //     3: queen
+    // Piece type:
+    // bit 20: previous state ep possible?
+    // bit 21-23: previous state ep file
+    // bit 24-27: castling rights before move
+    //    24: white queenside
+    //    25: white kingside
+    //    26: black queenside
+    //    27: black kingside
+    // bit 28: current move is en passant?
+    #[repr(transparent)]
+    #[derive(Debug, Clone)]
+    pub struct Move(u32);
+
+    impl Move {
+        pub fn new() -> Self {
+            Self(0)
+        }
+        pub fn from_square(&self) -> usize {
+            (self.0 & 0b111111) as usize
+        }
+        pub fn to_square(&self) -> usize {
+            ((self.0 >> 6) & 0b111111) as usize
+        }
+        pub fn moving_piece(&self) -> u8 {
+            ((self.0 >> 12) & 0b111) as u8
+        }
+        pub fn captured_piece(&self) -> u8 {
+            ((self.0 >> 15) & 0b111) as u8
+        }
+        pub fn promotion_piece(&self) -> u8 {
+            ((self.0 >> 18) & 0b11) as u8
+        }
+        pub fn is_prev_ep(&self) -> bool {
+            ((self.0 >> 20) & 0b1) != 0
+        }
+        pub fn prev_ep_file(&self) -> u8 {
+            ((self.0 >> 21) & 0b111) as u8
+        }
+        pub fn white_queenside_castle_rights(&self) -> bool {
+            ((self.0 >> 24) & 0b1) != 0
+        }
+        pub fn white_kingside_castle_rights(&self) -> bool {
+            ((self.0 >> 25) & 0b1) != 0
+        }
+        pub fn black_queenside_castle_rights(&self) -> bool {
+            ((self.0 >> 26) & 0b1) != 0
+        }
+        pub fn black_kingside_castle_rights(&self) -> bool {
+            ((self.0 >> 27) & 0b1) != 0
+        }
+        pub fn is_ep(&self) -> bool {
+            ((self.0 >> 28) & 0b1) != 0
+        }
+        pub fn set_from_square(&mut self, square: usize) {
+            self.0 |= (square as u32) & 0b111111;
+        }
+        pub fn set_to_square(&mut self, square: usize) {
+            self.0 |= ((square as u32) & 0b111111) << 6;
+        }
+        pub fn set_moving_piece(&mut self, piece: u8) {
+            self.0 |= ((piece as u32) & 0b111) << 12;
+        }
+        pub fn set_captured_piece(&mut self, piece: u8) {
+            self.0 |= ((piece as u32) & 0b111) << 15;
+        }
+        pub fn set_promotion_piece(&mut self, piece: u8) {
+            self.0 |= ((piece as u32) & 0b11) << 18;
+        }
+        pub fn set_prev_is_ep(&mut self) {
+            self.0 |= 1 << 20;
+        }
+        pub fn set_prev_ep_file(&mut self, file: u8) {
+            self.0 |= ((file as u32) & 0b111) << 21;
+        }
+        pub fn set_white_queenside_castle_rights(&mut self) {
+            self.0 |= 1 << 24;
+        }
+        pub fn set_white_kingside_castle_rights(&mut self) {
+            self.0 |= 1 << 25;
+        }
+        pub fn set_black_queenside_castle_rights(&mut self) {
+            self.0 |= 1 << 26;
+        }
+        pub fn set_black_kingside_castle_rights(&mut self) {
+            self.0 |= 1 << 27;
+        }
+        pub fn set_is_ep(&mut self) {
+            self.0 |= 1 << 28;
+        }
+    }
+
+    impl Board {
+        pub fn generate_moves(&self) -> Vec<u32> {
+            let mut moves = Vec::new();
+            todo!();
+            moves
+        }
+        pub fn generate_sliding_moves(&self, moves: &mut Vec<u32>) {
+            todo!();
+        }
+        pub fn generate_nonsliding_moves(&self, moves: &mut Vec<u32>) {
+            todo!();
+        }
+    }
+}
 
 struct Board {
     white_pawns: u64,
@@ -24,7 +151,7 @@ struct Board {
     occupied: u64,
     empty: u64,
 
-    ep: Option<Rank>,
+    ep: Option<u64>,
     castling: CastlingRights,
     side_to_move: Color,
 }
@@ -44,17 +171,8 @@ enum Color {
     Black,
 }
 
-#[derive(Clone, Debug)]
-enum Rank {
-    A,
-    B,
-    C,
-    D,
-    E,
-    F,
-    G,
-    H,
-}
+mod sliding_attacks;
+pub use sliding_attacks::{RookTable, BishopTable};
 
 const RANK8: u64 = 0xFF00_0000_0000_0000;
 const RANK7: u64 = 0x00FF_0000_0000_0000;
@@ -150,136 +268,6 @@ pub fn king_attack_table() -> [u64; 64] {
     arr
 }
 
-// Don't know exactly how this works but it does
-pub fn gen_subsets(mask: u64) -> Vec<u64> {
-    let mut subsets = Vec::new();
-    let mut subset = mask;
-    loop {
-        subsets.push(subset);
-        if subset == 0 {
-            break;
-        }
-        subset = (subset - 1) & mask;
-    }
-    subsets
-}
-
-pub fn gen_empty_slide_rook_inner(square: usize) -> u64 {
-    let rank = square / 8;
-    let file = square % 8;
-    let mut attacks = 0;
-    for r in 1..7 {
-        if r == rank {
-            continue;
-        }
-        attacks |= 1 << (r * 8 + file);
-    }
-    for f in 1..7 {
-        if f == file {
-            continue;
-        }
-        attacks |= 1 << (rank * 8 + f);
-    }
-    attacks
-}
-
-pub fn random_u64_few_bits() -> u64 {
-    // https://www.chessprogramming.org/index.php?title=Looking_for_Magics&oldid=2272
-    fastrand::u64(..) & fastrand::u64(..) & fastrand::u64(..)
-}
-
-pub fn find_magic_rook(square: usize) -> u64 {
-    let mask = gen_empty_slide_rook_inner(square);
-    let subsets = gen_subsets(mask);
-    let n = mask.count_ones();
-    let mut used = vec![0u64; 1 << n];
-    loop {
-        let magic = random_u64_few_bits();
-        if (mask.wrapping_mul(magic) & 0xFF00_0000_0000_0000).count_ones() < 6 {
-            // https://www.chessprogramming.org/index.php?title=Looking_for_Magics&oldid=2272
-            continue;
-        }
-        for i in used.iter_mut() {
-            *i = 0;
-        }
-        let mut success = true;
-        for &occ in subsets.iter() {
-            let index = (occ.wrapping_mul(magic) >> (64 - n)) as usize;
-            let atk = gen_slide_rook(square, occ);
-            if used[index] == 0 {
-                used[index] = atk;
-            } else if used[index] != atk {
-                success = false;
-                break;
-            }
-        }
-        if success {
-            return magic;
-        }
-    }
-}
-
-pub fn gen_slide_rook(square: usize, blockers: u64) -> u64 {
-    let rank = square / 8;
-    let file = square % 8;
-    let mut attacks = 0;
-    // Up
-    for r in rank + 1..8 {
-        let sq = r * 8 + file;
-        attacks |= 1 << sq;
-        if (blockers & (1 << sq)) != 0 {
-            break;
-        }
-    }
-    // Down
-    for r in (0..rank).rev() {
-        let sq = r * 8 + file;
-        attacks |= 1 << sq;
-        if (blockers & (1 << sq)) != 0 {
-            break;
-        }
-    }
-    // Right
-    for f in file + 1..8 {
-        let sq = rank * 8 + f;
-        attacks |= 1 << sq;
-        if (blockers & (1 << sq)) != 0 {
-            break;
-        }
-    }
-    // Left
-    for f in (0..file).rev() {
-        let sq = rank * 8 + f;
-        attacks |= 1 << sq;
-        if (blockers & (1 << sq)) != 0 {
-            break;
-        }
-    }
-    attacks
-}
-
-
-
-// pub fn gen_empty_slide_rook(square: usize) -> u64 {
-//     let rank = square / 8;
-//     let file = square % 8;
-//     let mut attacks = 0u64;
-//     for r in rank + 1..8 {
-//         attacks |= 1u64 << (r * 8 + file);
-//     }
-//     for r in (0..rank).rev() {
-//         attacks |= 1u64 << (r * 8 + file);
-//     }
-//     for f in file + 1..8 {
-//         attacks |= 1u64 << (rank * 8 + f);
-//     }
-//     for f in (0..file).rev() {
-//         attacks |= 1u64 << (rank * 8 + f);
-//     }
-//     attacks
-// }
-
-
 pub fn print_bb(bitboard: u64) {
     for rank in (0..8).rev() {
         for file in 0..8 {
@@ -287,7 +275,7 @@ pub fn print_bb(bitboard: u64) {
             if (bitboard >> square) & 1 == 1 {
                 print!("\x1b[32m1 \x1b[0m");
             } else {
-                print!(" 0");
+                print!("0 ");
             }
         }
         println!();
