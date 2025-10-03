@@ -9,8 +9,19 @@ mod movegen {
 
     use super::*;
 
-    pub const PAWN_PIECE_TYPE: u64 = 0x1;
-    const x: u64 = todo!();
+    pub const NONE_PIECE_TYPE: u8 = 0x0;
+    pub const PAWN_PIECE_TYPE: u8 = 0x1;
+    pub const KNIGHT_PIECE_TYPE: u8 = 0x2;
+    pub const BISHOP_PIECE_TYPE: u8 = 0x3;
+    pub const ROOK_PIECE_TYPE: u8 = 0x4;
+    pub const QUEEN_PIECE_TYPE: u8 = 0x5;
+    pub const KING_PIECE_TYPE: u8 = 0x6;
+    
+
+    pub const PROMO_KNIGHT: u8 = 0x0;
+    pub const PROMO_BISHOP: u8 = 0x1;
+    pub const PROMO_ROOK: u8 = 0x2;
+    pub const PROMO_QUEEN: u8 = 0x3;
 
     // bits 0-5: "from" file/rank
     // bits 6-11: "to" file/rank
@@ -24,7 +35,7 @@ mod movegen {
     //     5: queen
     //     6: king
 
-    // bit 18-19: promotion piece type (0 if non promotion)
+    // bit 18-19: promotion piece type
     //     Promotion:
     //     0: knight
     //     1: bishop
@@ -68,17 +79,13 @@ mod movegen {
         pub fn prev_ep_file(&self) -> u8 {
             ((self.0 >> 21) & 0b111) as u8
         }
-        pub fn white_queenside_castle_rights(&self) -> bool {
-            ((self.0 >> 24) & 0b1) != 0
-        }
-        pub fn white_kingside_castle_rights(&self) -> bool {
-            ((self.0 >> 25) & 0b1) != 0
-        }
-        pub fn black_queenside_castle_rights(&self) -> bool {
-            ((self.0 >> 26) & 0b1) != 0
-        }
-        pub fn black_kingside_castle_rights(&self) -> bool {
-            ((self.0 >> 27) & 0b1) != 0
+        pub fn castling_rights(&self) -> CastlingRights {
+            CastlingRights {
+                white_queenside: ((self.0 >> 24) & 0b1) != 0,
+                white_kingside: ((self.0 >> 25) & 0b1) != 0,
+                black_queenside: ((self.0 >> 26) & 0b1) != 0,
+                black_kingside: ((self.0 >> 27) & 0b1) != 0,
+            }
         }
         pub fn is_ep(&self) -> bool {
             ((self.0 >> 28) & 0b1) != 0
@@ -98,23 +105,25 @@ mod movegen {
         pub fn set_promotion_piece(&mut self, piece: u8) {
             self.0 |= ((piece as u32) & 0b11) << 18;
         }
-        pub fn set_prev_is_ep(&mut self) {
-            self.0 |= 1 << 20;
+        pub fn set_prev_ep(&mut self, ep: Option<u8>) {
+            if let Some(file) = ep {
+                self.0 |= 1 << 20;
+                self.0 |= ((file as u32) & 0b111) << 21;
+            }
         }
-        pub fn set_prev_ep_file(&mut self, file: u8) {
-            self.0 |= ((file as u32) & 0b111) << 21;
-        }
-        pub fn set_white_queenside_castle_rights(&mut self) {
-            self.0 |= 1 << 24;
-        }
-        pub fn set_white_kingside_castle_rights(&mut self) {
-            self.0 |= 1 << 25;
-        }
-        pub fn set_black_queenside_castle_rights(&mut self) {
-            self.0 |= 1 << 26;
-        }
-        pub fn set_black_kingside_castle_rights(&mut self) {
-            self.0 |= 1 << 27;
+        pub fn set_castling_rights(&mut self, rights: CastlingRights) {
+            if rights.white_queenside {
+                self.0 |= 1 << 24;
+            }
+            if rights.white_kingside {
+                self.0 |= 1 << 25;
+            }
+            if rights.black_queenside {
+                self.0 |= 1 << 26;
+            }
+            if rights.black_kingside {
+                self.0 |= 1 << 27;
+            }
         }
         pub fn set_is_ep(&mut self) {
             self.0 |= 1 << 28;
@@ -124,64 +133,129 @@ mod movegen {
     pub type Moves = tinyvec::ArrayVec<[Move; 218]>;
 
     impl Board {
-        pub fn generate_moves(&self, moves: &mut Moves, white: bool) {
+        pub fn generate_moves(&self, moves: &mut Moves, side: Side) {
             todo!();
         }
-        pub fn king_moves(&self, moves: &mut Moves, white: bool) {
-            let king = if white {
-                self.white_king
-            } else {
-                self.black_king
-            };
+        pub fn king_moves(&self, moves: &mut Moves, side: Side) {
+            let king = self.kings[side];
             let king = lsb1(king);
             let move_bb = self.king_attack_table[king];
-            let opponent_attacks = self.attacks(!white);
-            let allowed_bb = move_bb & !opponent_attacks;
+            let opponent_attacks = self.attacks(!side);
+            // King can move to squares where
+            // 1. It can reach it
+            // 2. It is not under attack by opponent pieces
+            // 3. It is not occupied by friendly pieces
+            let mut allowed_bb = move_bb & !opponent_attacks & self.pieces[side ];
+            while allowed_bb != 0 {
+                let lsb = lsb1(allowed_bb);
+                allowed_bb &= !(1 << lsb);
+                let mut mv = Move::new();
+                mv.set_from_square(king);
+                mv.set_to_square(lsb);
+                mv.set_moving_piece(KING_PIECE_TYPE);
+                if (self.pieces[!side] & (1 << lsb)) != 0 {
+                    mv.set_captured_piece(self.arr[lsb]);
+                }
+                mv.set_prev_ep(self.ep);
+                mv.set_castling_rights(self.castling);
+                moves.push(mv);
+            }
         }
-        pub fn attacks(&self, white: bool) -> u64 {
-            let pawn_attacks = if white {
+        pub fn other_moves(&self, moves: &mut Moves, side: Side) {
+            let king = lsb1(self.kings[side]);
+            let king_bishop_attacks = self.bishop_table.lookup(king, self.occupied);
+            let king_rook_attacks = self.rook_table.lookup(king, self.occupied);
+            let mut pawns = self.pawns[side];
+            let mut knights = self.knights[side];
+            let mut bishops = self.bishops[side];
+            let mut rooks = self.rooks[side];
+            let mut queens = self.queens[side];
+
+            todo!()
+        }
+        // pub fn diagonal_moves(&self, moves: &mut Moves, side: Side) {
+        //     let king = lsb1(self.kings[side]);
+        //     let king_bishop_attacks = self.bishop_table.lookup(king, self.occupied);
+            
+        // }
+        // pub fn straight_moves(&self, moves: &mut Moves, side: Side) {
+        //     todo!()
+        // }
+        // pub fn pinned(&self, side: Side) -> u64 {
+        //     let king = lsb1(self.kings[side]);
+        //     let king_bishop_attacks = self.bishop_table.lookup(king, self.occupied);
+        //     let king_rook_attacks = self.rook_table.lookup(king, self.occupied);
+            
+        //     let removed_king_bishop_attacks = self.bishop_table.lookup(king, self.occupied & !king_bishop_attacks);
+        //     let removed_king_rook_attacks = self.rook_table.lookup(king, self.occupied & !king_rook_attacks);
+        //     pinned
+        // }
+        pub fn attacks(&self, side: Side) -> u64 {
+            let pawn_attacks = if side == WHITE{
                 self.w_pawn_attacks()
             } else {
                 self.b_pawn_attacks()
             };
-            let king = if white {
-                self.white_king
-            } else {
-                self.black_king
-            };
+            let king = self.kings[side];
             pawn_attacks
-                & self.knight_attacks(white)
-                & self.bishop_attacks(white)
-                & self.rook_attacks(white)
-                & self.queen_attacks(white)
+                & self.knight_attacks(side)
+                & self.bishop_attacks(side)
+                & self.rook_attacks(side)
+                & self.queen_attacks(side)
                 & self.king_attack_table[lsb1(king)]
         }
     }
 }
 
-struct Board {
-    white_pawns: u64,
-    white_knights: u64,
-    white_bishops: u64,
-    white_rooks: u64,
-    white_queens: u64,
-    white_king: u64,
-    black_pawns: u64,
-    black_knights: u64,
-    black_bishops: u64,
-    black_rooks: u64,
-    black_queens: u64,
-    black_king: u64,
+#[derive(Clone, Debug, Hash, Copy, PartialEq, Eq)]
+pub enum Side {
+    WHITE = 0,
+    BLACK = 1,
+}
+use Side::*;
+use std::ops::{Index, IndexMut, Not};
+impl Not for Side {
+    type Output = Side;
 
-    white_pieces: u64,
-    black_pieces: u64,
+    fn not(self) -> Self::Output {
+        match self {
+            WHITE => BLACK,
+            BLACK => WHITE,
+        }
+    }
+}
+impl<T> Index<Side> for [T; 2] {
+    type Output = T;
+
+    fn index(&self, index: Side) -> &Self::Output {
+        &self[index]
+    }
+}
+impl<T> IndexMut<Side> for [T; 2] {
+    fn index_mut(&mut self, index: Side) -> &mut Self::Output {
+        &mut self[index]
+    }
+}
+
+
+struct Board {
+    pawns: [u64; 2],
+    knights: [u64; 2],
+    bishops: [u64; 2],
+    rooks: [u64; 2],
+    queens: [u64; 2],
+    kings: [u64; 2],
+
+    pieces: [u64; 2],
+
+    arr: [u8; 64],
 
     occupied: u64,
     empty: u64,
 
-    ep: Option<u64>,
+    ep: Option<u8>,
     castling: CastlingRights,
-    side_to_move: Color,
+    side_to_move: Side,
 
     pawn_attack_table: [[u64; 64]; 2],
     knight_attack_table: [u64; 64],
@@ -192,18 +266,12 @@ struct Board {
 }
 
 #[allow(clippy::struct_excessive_bools)]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Copy)]
 struct CastlingRights {
     white_kingside: bool,
     white_queenside: bool,
     black_kingside: bool,
     black_queenside: bool,
-}
-
-#[derive(Clone, Debug)]
-enum Color {
-    White,
-    Black,
 }
 
 mod sliding_attacks;
@@ -230,19 +298,15 @@ const FILE_H: u64 = 0x8080_8080_8080_8080;
 
 impl Board {
     fn w_pawn_attacks(&self) -> u64 {
-        let pawns = self.white_pawns;
+        let pawns = self.pawns[WHITE];
         (pawns << 9) & !FILE_A | (pawns << 7) & !FILE_H
     }
     fn b_pawn_attacks(&self) -> u64 {
-        let pawns = self.black_pawns;
+        let pawns = self.pawns[BLACK];
         (pawns >> 9) & !FILE_H | (pawns >> 7) & !FILE_A
     }
-    fn knight_attacks(&self, white: bool) -> u64 {
-        let mut knights = if white {
-            self.white_knights
-        } else {
-            self.black_knights
-        };
+    fn knight_attacks(&self, side: Side) -> u64 {
+        let mut knights = self.knights[side];
         let mut attacks = 0u64;
         while knights != 0 {
             let lsb = lsb1(knights);
@@ -251,12 +315,8 @@ impl Board {
         }
         attacks
     }
-    fn bishop_attacks(&self, white: bool) -> u64 {
-        let mut bishops = if white {
-            self.white_bishops
-        } else {
-            self.black_bishops
-        };
+    fn bishop_attacks(&self, side: Side) -> u64 {
+        let mut bishops = self.bishops[side];
         let mut attacks = 0u64;
         while bishops != 0 {
             let lsb = lsb1(bishops);
@@ -265,12 +325,8 @@ impl Board {
         }
         attacks
     }
-    fn rook_attacks(&self, white: bool) -> u64 {
-        let mut rooks = if white {
-            self.white_rooks
-        } else {
-            self.black_rooks
-        };
+    fn rook_attacks(&self, side: Side) -> u64 {
+        let mut rooks = self.rooks[side];
         let mut attacks = 0u64;
         while rooks != 0 {
             let lsb = lsb1(rooks);
@@ -279,18 +335,14 @@ impl Board {
         }
         attacks
     }
-    fn queen_attacks(&self, white: bool) -> u64 {
-        let mut queens = if white {
-            self.white_queens
-        } else {
-            self.black_queens
-        };
+    fn queen_attacks(&self, side: Side) -> u64 {
+        let mut queens = self.queens[side];
         let mut attacks = 0u64;
         while queens != 0 {
             let lsb = lsb1(queens);
             queens &= !(1 << lsb);
             attacks |= self.rook_table.lookup(lsb, self.occupied)
-                & self.bishop_table.lookup(lsb, self.occupied);
+                | self.bishop_table.lookup(lsb, self.occupied);
         }
         attacks
     }
@@ -328,8 +380,8 @@ pub fn pawn_attack_table() -> [[u64; 64]; 2] {
     let mut arr = [[0u64; 64]; 2];
     for i in 0..64 {
         let bitboard = 1u64 << i;
-        arr[0][i] = (bitboard << 9) & !FILE_A | (bitboard << 7) & !FILE_H;
-        arr[1][i] = (bitboard >> 9) & !FILE_H | (bitboard >> 7) & !FILE_A;
+        arr[WHITE ][i] = (bitboard << 9) & !FILE_A | (bitboard << 7) & !FILE_H;
+        arr[BLACK ][i] = (bitboard >> 9) & !FILE_H | (bitboard >> 7) & !FILE_A;
     }
     arr
 }
