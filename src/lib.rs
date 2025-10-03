@@ -1,11 +1,16 @@
-#![warn(clippy::all)]
-#![warn(clippy::pedantic)]
-#![warn(clippy::nursery)]
+// #![warn(clippy::all)]
+// #![warn(clippy::pedantic)]
+// #![warn(clippy::nursery)]
 
-
+mod utils;
 
 mod movegen {
+    use crate::utils::lsb1;
+
     use super::*;
+
+    pub const PAWN_PIECE_TYPE: u64 = 0x1;
+    const x: u64 = todo!();
 
     // bits 0-5: "from" file/rank
     // bits 6-11: "to" file/rank
@@ -35,7 +40,7 @@ mod movegen {
     //    27: black kingside
     // bit 28: current move is en passant?
     #[repr(transparent)]
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, Default)]
     pub struct Move(u32);
 
     impl Move {
@@ -116,17 +121,40 @@ mod movegen {
         }
     }
 
+    pub type Moves = tinyvec::ArrayVec<[Move; 218]>;
+
     impl Board {
-        pub fn generate_moves(&self) -> Vec<u32> {
-            let mut moves = Vec::new();
-            todo!();
-            moves
-        }
-        pub fn generate_sliding_moves(&self, moves: &mut Vec<u32>) {
+        pub fn generate_moves(&self, moves: &mut Moves, white: bool) {
             todo!();
         }
-        pub fn generate_nonsliding_moves(&self, moves: &mut Vec<u32>) {
-            todo!();
+        pub fn king_moves(&self, moves: &mut Moves, white: bool) {
+            let king = if white {
+                self.white_king
+            } else {
+                self.black_king
+            };
+            let king = lsb1(king);
+            let move_bb = self.king_attack_table[king];
+            let opponent_attacks = self.attacks(!white);
+            let allowed_bb = move_bb & !opponent_attacks;
+        }
+        pub fn attacks(&self, white: bool) -> u64 {
+            let pawn_attacks = if white {
+                self.w_pawn_attacks()
+            } else {
+                self.b_pawn_attacks()
+            };
+            let king = if white {
+                self.white_king
+            } else {
+                self.black_king
+            };
+            pawn_attacks
+                & self.knight_attacks(white)
+                & self.bishop_attacks(white)
+                & self.rook_attacks(white)
+                & self.queen_attacks(white)
+                & self.king_attack_table[lsb1(king)]
         }
     }
 }
@@ -154,6 +182,13 @@ struct Board {
     ep: Option<u64>,
     castling: CastlingRights,
     side_to_move: Color,
+
+    pawn_attack_table: [[u64; 64]; 2],
+    knight_attack_table: [u64; 64],
+    king_attack_table: [u64; 64],
+
+    rook_table: RookTable,
+    bishop_table: BishopTable,
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -172,7 +207,8 @@ enum Color {
 }
 
 mod sliding_attacks;
-pub use sliding_attacks::{RookTable, BishopTable};
+pub use sliding_attacks::{BishopTable, RookTable};
+use utils::lsb1;
 
 const RANK8: u64 = 0xFF00_0000_0000_0000;
 const RANK7: u64 = 0x00FF_0000_0000_0000;
@@ -192,38 +228,100 @@ const FILE_F: u64 = 0x2020_2020_2020_2020;
 const FILE_G: u64 = 0x4040_4040_4040_4040;
 const FILE_H: u64 = 0x8080_8080_8080_8080;
 
-fn w_pawn_push_targets(pawns: u64, empty: u64) -> u64 {
-    pawns << 8 & empty
+impl Board {
+    fn w_pawn_attacks(&self) -> u64 {
+        let pawns = self.white_pawns;
+        (pawns << 9) & !FILE_A | (pawns << 7) & !FILE_H
+    }
+    fn b_pawn_attacks(&self) -> u64 {
+        let pawns = self.black_pawns;
+        (pawns >> 9) & !FILE_H | (pawns >> 7) & !FILE_A
+    }
+    fn knight_attacks(&self, white: bool) -> u64 {
+        let mut knights = if white {
+            self.white_knights
+        } else {
+            self.black_knights
+        };
+        let mut attacks = 0u64;
+        while knights != 0 {
+            let lsb = lsb1(knights);
+            knights &= !(1 << lsb);
+            attacks |= self.knight_attack_table[lsb];
+        }
+        attacks
+    }
+    fn bishop_attacks(&self, white: bool) -> u64 {
+        let mut bishops = if white {
+            self.white_bishops
+        } else {
+            self.black_bishops
+        };
+        let mut attacks = 0u64;
+        while bishops != 0 {
+            let lsb = lsb1(bishops);
+            bishops &= !(1 << lsb);
+            attacks |= self.bishop_table.lookup(lsb, self.occupied);
+        }
+        attacks
+    }
+    fn rook_attacks(&self, white: bool) -> u64 {
+        let mut rooks = if white {
+            self.white_rooks
+        } else {
+            self.black_rooks
+        };
+        let mut attacks = 0u64;
+        while rooks != 0 {
+            let lsb = lsb1(rooks);
+            rooks &= !(1 << lsb);
+            attacks |= self.rook_table.lookup(lsb, self.occupied);
+        }
+        attacks
+    }
+    fn queen_attacks(&self, white: bool) -> u64 {
+        let mut queens = if white {
+            self.white_queens
+        } else {
+            self.black_queens
+        };
+        let mut attacks = 0u64;
+        while queens != 0 {
+            let lsb = lsb1(queens);
+            queens &= !(1 << lsb);
+            attacks |= self.rook_table.lookup(lsb, self.occupied)
+                & self.bishop_table.lookup(lsb, self.occupied);
+        }
+        attacks
+    }
 }
 
-fn w_pawn_double_push_targets(pawns: u64, empty: u64) -> u64 {
-    let single_push = w_pawn_push_targets(pawns, empty);
-    single_push << 8 & empty & RANK4
-}
+impl Board {
+    // fn w_pawn_push_targets(pawns: u64, empty: u64) -> u64 {
+    //     pawns << 8 & empty
+    // }
 
-fn b_pawn_push_targets(pawns: u64, empty: u64) -> u64 {
-    pawns >> 8 & empty
-}
+    // fn w_pawn_double_push_targets(pawns: u64, empty: u64) -> u64 {
+    //     let single_push = w_pawn_push_targets(pawns, empty);
+    //     single_push << 8 & empty & RANK4
+    // }
 
-fn b_pawn_double_push_targets(pawns: u64, empty: u64) -> u64 {
-    let single_push = b_pawn_push_targets(pawns, empty);
-    single_push >> 8 & empty & RANK5
-}
+    // fn b_pawn_push_targets(pawns: u64, empty: u64) -> u64 {
+    //     pawns >> 8 & empty
+    // }
 
-fn w_pawn_attacks(pawns: u64) -> u64 {
-    (pawns << 9) & !FILE_A | (pawns << 7) & !FILE_H
-}
+    // fn b_pawn_double_push_targets(pawns: u64, empty: u64) -> u64 {
+    //     let single_push = b_pawn_push_targets(pawns, empty);
+    //     single_push >> 8 & empty & RANK5
+    // }
 
-fn w_pawn_attacks_target(pawns: u64, targets: u64) -> u64 {
-    w_pawn_attacks(pawns) & targets
-}
+    // fn w_pawn_attacks_target(pawns: u64, targets: u64) -> u64 {
+    //     w_pawn_attacks(pawns) & targets
+    // }
 
-fn b_pawn_attacks(pawns: u64) -> u64 {
-    (pawns >> 9) & !FILE_H | (pawns >> 7) & !FILE_A
-}
-
-fn b_pawn_attacks_target(pawns: u64, targets: u64) -> u64 {
-    b_pawn_attacks(pawns) & targets
+    // fn b_pawn_attacks_target(pawns: u64, targets: u64) -> u64 {
+    //     b_pawn_attacks(pawns) & targets
+    // }
 }
 
 pub fn pawn_attack_table() -> [[u64; 64]; 2] {
